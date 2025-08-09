@@ -1,5 +1,5 @@
 // app.js
-// Minimal WhatsApp + ChatGPT bot with a 3-option menu
+// WhatsApp + ChatGPT bot with 3-option menu (defensive button titles + payload logging)
 
 const express = require('express');
 const axios = require('axios');
@@ -15,7 +15,6 @@ const WABA_TOKEN = process.env.WHATSAPP_TOKEN;                   // System User 
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;    // WhatsApp > API Setup
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;               // OpenAI API key
 
-// ======= BASIC VALIDATION =======
 function assertEnv(name, val) {
   if (!val) console.warn(`[WARN] Missing env var ${name}`);
 }
@@ -27,8 +26,8 @@ assertEnv('OPENAI_API_KEY', OPENAI_API_KEY);
 // ======= OPENAI CLIENT =======
 const oai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// ======= SIMPLE IN-MEMORY SESSIONS (swap to Redis/DB in prod) =======
-const sessions = new Map(); // key: from (phone), value: { mode: 'customer'|'zim'|'awanachi' }
+// ======= SIMPLE IN-MEMORY SESSIONS =======
+const sessions = new Map(); // key: phone, value: { mode }
 
 // ======= MODES & PROMPTS =======
 const MODES = {
@@ -54,42 +53,55 @@ const MODES = {
   },
 };
 
+// ======= UTIL: enforce button title rules =======
+function safeTitle(s) {
+  if (!s) return 'Option';
+  const trimmed = String(s).trim();
+  // WhatsApp: 1..20 chars. Force hard cap and remove newlines.
+  return trimmed.replace(/\s+/g, ' ').slice(0, 20);
+}
+
 // ======= WHATSAPP HELPERS =======
 async function sendWhatsApp(to, payload) {
   const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
+  // DEBUG: log outgoing payload to catch long titles, etc.
+  console.log('[WA SEND] ->', JSON.stringify(payload));
   try {
     await axios.post(url, payload, {
       headers: { Authorization: `Bearer ${WABA_TOKEN}` },
       timeout: 15000,
     });
   } catch (e) {
-    console.error("Handler error:", e?.response?.data || e.message);
+    console.error('Handler error:', e?.response?.data || e.message);
   }
 }
 
 async function sendText(to, text) {
   return sendWhatsApp(to, {
-    messaging_product: "whatsapp",
+    messaging_product: 'whatsapp',
     to,
-    type: "text",
+    type: 'text',
     text: { body: text },
   });
 }
 
 async function sendMenu(to) {
-  // Button titles MUST be <= 20 chars (WhatsApp constraint)
+  const b1 = safeTitle('Customer');       // <= 20 chars
+  const b2 = safeTitle('ZIM Student');    // <= 20 chars
+  const b3 = safeTitle('Awanachi');       // <= 20 chars
+
   return sendWhatsApp(to, {
-    messaging_product: "whatsapp",
+    messaging_product: 'whatsapp',
     to,
-    type: "interactive",
+    type: 'interactive',
     interactive: {
-      type: "button",
-      body: { text: "Hi! Choose an option:" },
+      type: 'button',
+      body: { text: 'Hi! Choose an option:' }, // body can be longer; error is about button titles
       action: {
         buttons: [
-          { type: "reply", reply: { id: "opt_customer",  title: "Customer" } },
-          { type: "reply", reply: { id: "opt_zim",       title: "ZIM Student" } },
-          { type: "reply", reply: { id: "opt_awanachi",  title: "Awanachi" } },
+          { type: 'reply', reply: { id: 'opt_customer',  title: b1 } },
+          { type: 'reply', reply: { id: 'opt_zim',       title: b2 } },
+          { type: 'reply', reply: { id: 'opt_awanachi',  title: b3 } },
         ],
       },
     },
@@ -105,18 +117,18 @@ function mapButtonToMode(id) {
 
 async function chatWithOpenAI(mode, userText) {
   try {
-    const sys = MODES[mode]?.system || "You are a helpful assistant.";
+    const sys = MODES[mode]?.system || 'You are a helpful assistant.';
     const resp = await oai.responses.create({
-      model: "gpt-4o-mini",
+      model: 'gpt-4o-mini',
       input: [
-        { role: "system", content: sys },
-        { role: "user", content: userText },
+        { role: 'system', content: sys },
+        { role: 'user', content: userText },
       ],
     });
-    return resp.output_text || "Sorry, I didn’t catch that.";
+    return resp.output_text || 'Sorry, I didn’t catch that.';
   } catch (e) {
-    console.error("OpenAI error:", e?.response?.data || e.message);
-    return "I’m having trouble responding right now. Please try again.";
+    console.error('OpenAI error:', e?.response?.data || e.message);
+    return 'I’m having trouble responding right now. Please try again.';
   }
 }
 
@@ -134,33 +146,28 @@ app.get('/', (req, res) => {
 
 // ======= WEBHOOK RECEIVER (POST /) =======
 app.post('/', async (req, res) => {
-  // ACK immediately (WhatsApp expects a quick 200)
-  res.sendStatus(200);
+  res.sendStatus(200); // ACK quickly
 
   try {
     const entry = req.body?.entry?.[0];
     const change = entry?.changes?.[0];
     const value = change?.value;
     const message = value?.messages?.[0];
-    const from = message?.from; // E.164 phone
+    const from = message?.from;
 
     if (!message || !from) return;
 
-    // Optional: simple request logging
-    // console.log("Incoming:", JSON.stringify(req.body, null, 2));
-
-    // Text content (if any)
     const txt = message.text?.body?.trim();
     const txtLower = txt?.toLowerCase();
 
-    // "menu" command always shows the menu
+    // Show menu on demand
     if (txtLower === 'menu') {
       await sendMenu(from);
       return;
     }
 
     // Handle interactive button reply
-    if (message.type === "interactive" && message.interactive?.type === "button_reply") {
+    if (message.type === 'interactive' && message.interactive?.type === 'button_reply') {
       const buttonId = message.interactive.button_reply?.id;
       const mode = mapButtonToMode(buttonId);
       if (mode) {
@@ -172,7 +179,7 @@ app.post('/', async (req, res) => {
       return;
     }
 
-    // First contact (no session yet): allow numeric shortcuts 1/2/3, else show menu
+    // First contact: allow numeric shortcuts 1/2/3, else show menu
     let sess = sessions.get(from);
     if (!sess) {
       if (txtLower === '1' || txtLower === '2' || txtLower === '3') {
@@ -185,17 +192,17 @@ app.post('/', async (req, res) => {
       return;
     }
 
-    // If we have a session mode, route text to OpenAI
-    if (message.type === "text" && txt) {
+    // Route to OpenAI
+    if (message.type === 'text' && txt) {
       const reply = await chatWithOpenAI(sess.mode, txt);
       await sendText(from, reply);
       return;
     }
 
-    // Fallback for non-text, non-button
-    await sendText(from, `Sorry, I can only handle text and buttons for now. Type "menu" to see options.`);
+    // Fallback
+    await sendText(from, 'Sorry, I can only handle text and buttons for now. Type "menu" to see options.');
   } catch (e) {
-    console.error("Handler error:", e?.response?.data || e.message);
+    console.error('Handler error:', e?.response?.data || e.message);
   }
 });
 
