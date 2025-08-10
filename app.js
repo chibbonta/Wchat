@@ -70,7 +70,7 @@ async function sendMenu(to) {
     type: 'interactive',
     interactive: {
       type: 'button',
-      body: { text: 'Hi! Choose an option:' },
+      body: { text: 'Thank you for contacting CA Zambia! Choose your category:' },
       action: {
         buttons: [
           { type: 'reply', reply: { id: 'opt_customer',  title: b1 } },
